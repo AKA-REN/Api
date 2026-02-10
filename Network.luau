@@ -1,117 +1,116 @@
--- Ai Vibe Code
+--// Network Library
 
-getgenv().network = getgenv().network or (function()
-    local network = {}
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
 
-    local remoteCache = {}
-    local connections = {}
-    local invokeRemotes = {}
+--// Types
+type Connection = RBXScriptConnection
+type Remote = RemoteEvent | RemoteFunction | UnreliableRemoteEvent
+type Cache = {
+	connections: { Connection },
+	callbacks: { [RemoteFunction]: (...any) -> ...any },
+	remotes: { [string | Instance]: Remote },
+}
 
-    local function resolveRemote(name)
-        if typeof(name) == "Instance" then
-            return name
-        end
+--// Module
+local network = {}
+network.__index = network
+network.cache = {
+	connections = {},
+	callbacks = {},
+	remotes = {},
+} :: Cache
 
-        if remoteCache[name] then
-            return remoteCache[name]
-        end
+--// Private
+local function resolve(name: string | Instance): Remote?
+	local cached = network.cache.remotes[name]
+	if cached then
+		return cached
+	end
 
-        local found = game:FindFirstChild(name, true)
-        if found then
-            remoteCache[name] = found
-        end
+	if typeof(name) == "Instance" then
+		network.cache.remotes[name] = name
+		return name
+	end
 
-        return found
-    end
+	local remote = ReplicatedStorage:FindFirstChild(name, true) or Workspace:FindFirstChild(name, true)
 
-    local function trackConnection(conn)
-        connections[#connections + 1] = conn
-    end
+	if remote then
+		network.cache.remotes[name] = remote
+	end
 
-    local function isValidRemote(remote)
-        return remote
-            and typeof(remote) == "Instance"
-            and (remote:IsA("RemoteEvent") or remote:IsA("RemoteFunction"))
-    end
+	return remote
+end
 
-    function network:Retrieve(name, callback)
-        assert(callback and type(callback) == "function", "[Network] callback must be a function")
+local function isEvent(remote: Remote): boolean
+	return remote:IsA("RemoteEvent") or remote:IsA("UnreliableRemoteEvent")
+end
 
-        local remote = resolveRemote(name)
-        if not remote or not isValidRemote(remote) then
-            warn("[Network] Invalid or missing remote:", tostring(name))
-            return nil
-        end
+local function isFunction(remote: Remote): boolean
+	return remote:IsA("RemoteFunction")
+end
 
-        if type(name) == "string" then
-            remoteCache[name] = remote
-        end
+--// Public
+function network:Retrieve(name: string | Instance, func: (...any) -> ()): Connection?
+	local remote = resolve(name)
 
-        if remote:IsA("RemoteEvent") then
-            local conn = remote.OnClientEvent:Connect(callback)
-            trackConnection(conn)
-            return conn
-        elseif remote:IsA("RemoteFunction") then
-            remote.OnClientInvoke = callback
-            invokeRemotes[#invokeRemotes + 1] = remote
-            return remote
-        end
-    end
+	if not remote then
+		return warn("[Network] Remote not found:", name)
+	end
 
-    function network:Send(name, ...)
-        local remote = resolveRemote(name)
-        if not remote or not isValidRemote(remote) then
-            warn("[Network] Invalid or missing remote:", tostring(name))
-            return nil
-        end
+	if isEvent(remote) then
+		local connection = remote.OnClientEvent:Connect(func)
+		table.insert(self.cache.connections, connection)
+		return connection
+	end
 
-        if remote:IsA("RemoteEvent") then
-            remote:FireServer(...)
-        elseif remote:IsA("RemoteFunction") then
-            return remote:InvokeServer(...)
-        end
-    end
+	if isFunction(remote) then
+		remote.OnClientInvoke = func
+		self.cache.callbacks[remote] = func
+		return
+	end
 
-    function network:SendSafe(name, ...)
-        local ok, result = pcall(self.Send, self, name, ...)
-        if not ok then
-            warn("[Network] SendSafe failed:", result)
-            return nil
-        end
-        return result
-    end
+	warn("[Network] Unsupported class:", remote.ClassName)
+end
 
-    function network:GetRemote(name)
-        return resolveRemote(name)
-    end
+function network:Send(name: string | Instance, ...: any): ...any
+	local remote = resolve(name)
 
-    function network:Disconnect()
-        for i = #connections, 1, -1 do
-            local conn = connections[i]
-            if typeof(conn) == "RBXScriptConnection" and conn.Connected then
-                conn:Disconnect()
-            end
-            connections[i] = nil
-        end
+	if not remote then
+		return warn("[Network] Remote not found:", name)
+	end
 
-        for i = #invokeRemotes, 1, -1 do
-            local remote = invokeRemotes[i]
-            if remote and remote:IsA("RemoteFunction") then
-                remote.OnClientInvoke = nil
-            end
-            invokeRemotes[i] = nil
-        end
+	if isEvent(remote) then
+		return remote:FireServer(...)
+	end
 
-        table.clear(remoteCache)
-    end
+	if isFunction(remote) then
+		return remote:InvokeServer(...)
+	end
 
-    function network:RemoveRemote(name)
-        if type(name) == "string" then
-            remoteCache[name] = nil
-        end
-    end
+	warn("[Network] Unsupported class:", remote.ClassName)
+end
 
-    return network
-end)()
+function network:ClearConnections()
+	for i = #self.cache.connections, 1, -1 do
+		local conn = self.cache.connections[i]
+		if conn.Connected then
+			conn:Disconnect()
+		end
+		self.cache.connections[i] = nil
+	end
 
+	for remote in self.cache.callbacks do
+		remote.OnClientInvoke = nil
+	end
+	table.clear(self.cache.callbacks)
+end
+
+function network:Destroy()
+	self:ClearConnections()
+	table.clear(self.cache.remotes)
+end
+
+--// Init
+getgenv().network = getgenv().network or network
 return getgenv().network
