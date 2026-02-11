@@ -1,101 +1,116 @@
+local RunService = game:GetService("RunService")
+
+local ThreadController = {}
+ThreadController.__index = ThreadController
+
 local LoopController = {}
 LoopController.__index = LoopController
-
-local ThreadController = setmetatable({}, LoopController)
-ThreadController.__index = ThreadController
 LoopController.Thread = ThreadController
 
 function LoopController.new()
-    local self = setmetatable({}, LoopController)
-    self.Heartbeat = game:GetService("RunService").Heartbeat
-    self.Threads = {}
-    self.Active = true
-    self.Connection = self.Heartbeat:Connect(function()
-        if not self.Active then return end
-        for i = #self.Threads, 1, -1 do
-            local thread = self.Threads[i]
-            if thread then thread:handle() end
-        end
-    end)
-    return self
+	local self = setmetatable({
+		Threads = {},
+		ThreadCount = 0,
+	}, LoopController)
+
+	self.Connection = RunService.Heartbeat:Connect(function(deltaTime)
+		local threads = self.Threads
+		for i = self.ThreadCount, 1, -1 do
+			local thread = threads[i]
+			if thread then
+				thread:handle(deltaTime)
+			end
+		end
+	end)
+
+	return self
 end
 
-function LoopController:newThread(...)
-    local thread = ThreadController.new(...)
-    self.Threads[#self.Threads + 1] = thread
-    return thread
+function LoopController:newThread(rate, func, repeatTimes)
+	local thread = ThreadController.new(rate, func, repeatTimes)
+	local count = self.ThreadCount + 1
+	self.ThreadCount = count
+	self.Threads[count] = thread
+	thread._index = count
+	thread._owner = self
+	return thread
 end
 
-function LoopController:removeThread(threadController)
-    local idx = table.find(self.Threads, threadController)
-    if idx then
-        threadController:Disable()
-        table.remove(self.Threads, idx)
-    end
+function LoopController:removeThread(thread)
+	local idx = thread._index
+	if not idx then
+		return
+	end
+	local threads = self.Threads
+	local count = self.ThreadCount
+	threads[idx] = threads[count]
+	if threads[idx] then
+		threads[idx]._index = idx
+	end
+	threads[count] = nil
+	self.ThreadCount = count - 1
+	thread._index = nil
 end
 
 function LoopController:Destroy()
-    self.Active = false
-    self.Connection:Disconnect()
-    for _, thread in ipairs(self.Threads) do
-        thread:Disable()
-    end
-    table.clear(self.Threads)
+	self.Connection:Disconnect()
+	for i = self.ThreadCount, 1, -1 do
+		local thread = self.Threads[i]
+		if thread then
+			thread:Disable()
+		end
+		self.Threads[i] = nil
+	end
+	self.ThreadCount = 0
 end
 
 function ThreadController.new(rate, func, repeatTimes)
-    local self = setmetatable({}, ThreadController)
-    self.Rate = rate or 0
-    self.finished = 0
-    self.repeatTimes = repeatTimes
-    self.MainFunction = func
-    self.Disabled = false
-    self.Status = "idle"
-
-    self._execute = function()
-        self.Status = "running"
-        local ok, err = pcall(func)  -- no colon, no accidental self injection
-        if not ok then
-            warn("[ThreadController] Execution error:", err)
-        end
-        task.wait(self.Rate)
-        self:Finish()
-    end
-
-    self.MainThread = coroutine.create(self._execute)
-    task.spawn(self.MainThread)
-    return self
+	return setmetatable({
+		Rate = rate,
+		Elapsed = 0,
+		Finished = 0,
+		RepeatTimes = repeatTimes,
+		MainFunction = func,
+		Disabled = false,
+	}, ThreadController)
 end
 
-function ThreadController:handle()
-    if self.Disabled then return end
+function ThreadController:handle(deltaTime)
+	if self.Disabled then
+		return
+	end
 
-    if self.repeatTimes and self.finished >= self.repeatTimes then
-        self:Disable()
-        return
-    end
+	self.Elapsed = self.Elapsed + deltaTime
+	if self.Elapsed < self.Rate then
+		return
+	end
+	self.Elapsed = 0
 
-    local state = coroutine.status(self.MainThread)
+	local repeatTimes = self.RepeatTimes
+	if repeatTimes and self.Finished >= repeatTimes then
+		self:Disable()
+		return
+	end
 
-    if state == "dead" and self.Status == "finished" then
-        self.Status = "idle"
-        self.MainThread = coroutine.create(self._execute)
-        task.spawn(self.MainThread)
-    end
-end
+	local ok, err = pcall(self.MainFunction)
+	if not ok then
+		warn(err)
+	end
 
-function ThreadController:Finish()
-    self.finished += 1
-    self.Status = "finished"
+	self.Finished = self.Finished + 1
 end
 
 function ThreadController:Disable()
-    if self.Disabled then return end
-    self.Disabled = true
-    local state = coroutine.status(self.MainThread)
-    if state ~= "dead" then
-        pcall(task.cancel, self.MainThread)
-    end
+	self.Disabled = true
+	if self._owner then
+		self._owner:removeThread(self)
+	end
+end
+
+function ThreadController:Reset()
+	self.Elapsed = 0
+	self.Finished = 0
+	self.Disabled = false
 end
 
 return LoopController
